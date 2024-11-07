@@ -4,9 +4,9 @@ version = 3
 
 [[package]]
 name = "anyhow"
-version = "1.0.92"
+version = "1.0.93"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74f37166d7d48a0284b99dd824694c26119c700b53bf0d1540cdb147dbdaaf13"
+checksum = "4c95c10ba0b00a02636238b814946408b1322d5ac4760326e6fb8ec956d85775"
 
 [[package]]
 name = "arbitrary"
@@ -173,18 +173,6 @@ checksum = "38cd60a9a42ec83a2ed7effb0b1f073270264ea99da7acfc44f7e8d74dee0384"
 dependencies = [
  "half",
  "libloading",
-]
-
-[[package]]
-name = "deep_learning"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "candle-core",
- "candle-kernels",
- "candle-nn",
- "itertools",
- "rand",
 ]
 
 [[package]]
@@ -456,6 +444,19 @@ name = "libm"
 version = "0.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ec2a862134d2a7d32d7983ddcdd1c4923530833c9f2ea1a44fc5fa473989058"
+
+[[package]]
+name = "machine_learning"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "candle-core",
+ "candle-kernels",
+ "candle-nn",
+ "itertools",
+ "num-traits",
+ "rand",
+]
 
 [[package]]
 name = "memchr"

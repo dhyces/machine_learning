@@ -1,7 +1,11 @@
 [package]
-name = "deep_learning"
+name = "machine_learning"
 version = "0.1.0"
 edition = "2021"
+
+[[bin]]
+path = "src/bigram.rs"
+name = "machine_learning"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -10,5 +14,6 @@ candle-core = { version = "0.7.2", features = ["cuda"] }
 candle-kernels = "0.7.2"
 candle-nn = "0.7.2"
 itertools = "0.13.0"
-anyhow = "1.0.92"
+anyhow = "1.0.93"
 rand = "0.8.5"
+num-traits = "0.2.18"
