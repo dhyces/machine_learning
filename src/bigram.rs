@@ -12,10 +12,13 @@ use rand::{Rng, SeedableRng};
 use crate::translator::{CharToU32, Translator, U32ToChar};
 
 const RAND_SEED: u64 = 1337;
+const TRAINING_ITERATIONS: u64 = 6000;
+const EVAL_ITERATIONS: u64 = 300;
+const LEARNING_RATE: f64 = 1e-3;
 
 fn main() -> candle_core::Result<()> {
     // Read file and collect all unique tokens, sorted
-    let mut file = BufReader::new(File::open(r"C:\Users\pokmo\OneDrive\Desktop\DevStuff\Rust\deep_learning\input.txt").expect("Should be a valid file"));
+    let mut file = BufReader::new(File::open(r".\input.txt").expect("Should be a valid file"));
     let mut contents = String::new();
     file.read_to_string(&mut contents).expect("Should be able to read file");
     let unique_sorted = contents.as_bytes().iter().sorted().unique().collect_vec();
@@ -30,7 +33,7 @@ fn main() -> candle_core::Result<()> {
 
     // Setup to use the first 90% for training data and the remaining 10% for validation
     let n = (data.len() * 9) / 10;
-    let (train_data, _validation_data) = data.split_at(n);
+    let (train_data, validation_data) = data.split_at(n);
 
     let mut rng = StdRng::seed_from_u64(RAND_SEED);
 
@@ -43,33 +46,29 @@ fn main() -> candle_core::Result<()> {
     println!("{}", yb);
 
     let var_map = VarMap::new();
+    // NOTE: This cannot be of DType::I64 due to a lack of support for uexp_ for 64-bit signed integers in CUDA
     let var_builder = VarBuilder::from_varmap(&var_map, DType::F32, &device);
-    let mut model = BigramLanguageModel::new(vocab_size, var_builder, rng.clone());
+    let mut model = BigramLanguageModel::new(vocab_size, var_builder);
     let (_, loss) = ModuleWithLoss::forward(&model, &xb, &yb)?;
     println!("{}", loss);
-    let generated = model.generate(&Tensor::zeros((1, 1), DType::U32, &device)?, 100)?;
-    println!("{:?}", translator.u32_array_to_chars(&generated.to_vec2::<u32>()?[0]));
+    let generated = model.generate(&Tensor::zeros((1, 1), DType::U32, &device)?, 100, &mut rng)?;
+    println!("{}", translator.u32_array_to_chars(&generated.to_vec2::<u32>()?[0]).unwrap().iter().collect::<String>());
 
-    let map_vars = var_map.all_vars();
-    println!("{:?}", &map_vars);
-    let mut optimizer = candle_nn::optim::AdamW::new_lr(map_vars, 1e-3)?;
+    let mut optimizer = candle_nn::optim::AdamW::new_lr(var_map.all_vars(), LEARNING_RATE)?;
 
-    let mut final_loss = None;
-    for steps in 0..6000 {
-        if steps % 300 == 0 {
-            let (xn, yn) = get_batch(&train_data, &device, 32, block_size, &mut rng)?;
-            let (_, loss) = ModuleWithLoss::forward(&model, &xn, &yn)?;
-            println!("Iteration: {} Loss: {}", steps, loss);
+    let batch_size = 32;
+    for steps in 0..TRAINING_ITERATIONS {
+        if steps % EVAL_ITERATIONS == 0 {
+            let (train_loss, val_loss) = estimate_loss(&model, &device, &train_data, &validation_data, block_size, batch_size, &mut rng)?;
+            println!("Iteration: {} Training Loss: {} Validation Loss: {}", steps, train_loss, val_loss);
         }
-        let (xn, yn) = get_batch(&train_data, &device, 32, block_size, &mut rng)?;
+        let (logits, targets) = get_batch(&train_data, &device, batch_size, block_size, &mut rng)?;
 
-        let (_, loss) = ModuleWithLoss::forward(&model, &xn, &yn)?;
+        let (_, loss) = ModuleWithLoss::forward(&model, &logits, &targets)?;
         optimizer.backward_step(&loss)?;
-        final_loss = Some(loss);
     }
-    println!("{}", final_loss.unwrap());
 
-    let generated = model.generate(&Tensor::zeros((1, 1), DType::U32, &device)?, 100)?;
+    let generated = model.generate(&Tensor::zeros((1, 1), DType::U32, &device)?, 100, &mut rng)?;
     println!("{}", translator.u32_array_to_chars(&generated.to_vec2::<u32>()?[0]).unwrap().iter().collect::<String>());
     Ok(())
 }
@@ -88,33 +87,42 @@ fn get_batch(data: &[u32], device: &Device, batch_size: usize, block_size: usize
     Ok((Tensor::new(xx, device)?, Tensor::new(yy, device)?))
 }
 
+fn estimate_loss(model: &BigramLanguageModel, device: &Device, train_data: &[u32], val_data: &[u32], block_size: usize, batch_size: usize, rng: &mut StdRng) -> candle_core::Result<(f32, f32)> {
+    let losses = (0..EVAL_ITERATIONS).map(|_| {
+        let (train_logits, train_targets) = get_batch(train_data, device, batch_size, block_size, rng).unwrap();
+        let (val_logits, val_targets) = get_batch(val_data, device, batch_size, block_size, rng).unwrap();
+        let (_, train_loss) = ModuleWithLoss::forward(model, &train_logits, &train_targets).unwrap();
+        let (_, val_loss) = ModuleWithLoss::forward(model, &val_logits, &val_targets).unwrap();
+        (train_loss.to_scalar::<f32>().unwrap(), val_loss.to_scalar::<f32>().unwrap())
+    }).collect::<Vec<(f32, f32)>>();
+    let (train_losses, val_losses): (Vec<_>, Vec<_>) = losses.iter().cloned().unzip();
+    Ok((train_losses.iter().sum::<f32>() / train_losses.len() as f32, val_losses.iter().sum::<f32>() / val_losses.len() as f32))
+}
+
 trait ModuleWithLoss {
     fn forward(&self, i: &Tensor, xs: &Tensor) -> candle_core::Result<(Tensor, Tensor)>;
 }
 
 struct BigramLanguageModel {
-    token_embedding_table: Embedding,
-    rng: StdRng
+    // light wrapper over a tensor, meant for retrieving rows
+    token_embedding_table: Embedding
 }
 
 impl BigramLanguageModel {
-    pub fn new(vocab_size: usize, var_builder: VarBuilder, rng: StdRng) -> Self {
+    pub fn new(vocab_size: usize, var_builder: VarBuilder) -> Self {
         Self {
-            // light wrapper over a tensor, meant for retrieving rows
-            // NOTE: This cannot be of DType::I64 due to a lack of support for uexp_ for 64-bit signed integers in CUDA
-            token_embedding_table: embedding(vocab_size, vocab_size, var_builder).unwrap(),
-            rng
+            token_embedding_table: embedding(vocab_size, vocab_size, var_builder).unwrap()
         }
     }
 
-    pub fn generate(&mut self, i: &Tensor, max_tokens: u32) -> candle_core::Result<Tensor> {
+    pub fn generate(&mut self, i: &Tensor, max_tokens: u32, rng: &mut StdRng) -> candle_core::Result<Tensor> {
         let mut generated = i.clone();
         for _ in 0..max_tokens {
             let logits = generated.apply(self)?;
             let logits = logits.i((.., logits.dim(1)? - 1, ..))?;
             let probabilities = candle_nn::ops::softmax(&logits, 1)?;
             let distribution = rand::distributions::WeightedIndex::new(&probabilities.to_vec2::<f32>()?[0]).unwrap();
-            let i_next = distribution.sample(&mut self.rng) as u32;
+            let i_next = distribution.sample(rng) as u32;
             let next_tensor = Tensor::full(i_next, 1, generated.device())?.unsqueeze(0)?;
             generated = Tensor::cat(&[generated, next_tensor], 1)?;
         }
@@ -138,5 +146,13 @@ impl ModuleWithLoss for BigramLanguageModel {
         // in this case, we expect loss to be -ln(1/65), so negative natlog of the inverse vocab size
         let loss = candle_nn::loss::cross_entropy(&logits, &targets)?;
         Ok((logits, loss))
+    }
+}
+
+impl Clone for BigramLanguageModel {
+    fn clone(&self) -> Self {
+        Self {
+            token_embedding_table: self.token_embedding_table.clone()
+        }
     }
 }
